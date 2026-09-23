@@ -1,0 +1,4 @@
+# classes compiladas e arquivos gerados pelos testes
+out/
+*.class
+*.bin
