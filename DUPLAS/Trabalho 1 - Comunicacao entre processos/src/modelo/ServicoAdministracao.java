@@ -1,10 +1,5 @@
 package modelo;
 
-/**
- * Classe de MODELO que implementa o serviço usado pelos ADMINISTRADORES:
- * introduzir/remover candidatos e criar notas informativas para os eleitores.
- * (O envio da nota por multicast UDP é feito pela camada de rede do servidor.)
- */
 public class ServicoAdministracao {
     private static final int TAMANHO_MAXIMO_NOTA = 500;
 

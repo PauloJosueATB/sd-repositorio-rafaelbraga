@@ -7,11 +7,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
-/**
- * Classe de MODELO que implementa o serviço usado pelos ELEITORES:
- * autenticar, listar candidatos, votar e apurar o resultado.
- * É usada tanto pelo serviço remoto da Questão 4 quanto pelo servidor da Questão 5.
- */
+
 public class ServicoVotacao {
     private final RepositorioEleicao repo;
 
@@ -23,7 +19,7 @@ public class ServicoVotacao {
         return repo.getEleicao();
     }
 
-    /** Valida login/senha. Devolve uma cópia do usuário SEM a senha. */
+   
     public Usuario autenticar(String login, String senha) throws ServicoException {
         if (login == null || senha == null || login.trim().isEmpty()) {
             throw new ServicoException("Login e senha são obrigatórios.");
@@ -49,10 +45,7 @@ public class ServicoVotacao {
         return repo.listarCandidatos();
     }
 
-    /**
-     * Registra o voto de um eleitor. Regras: apenas ELEITOR vota; somente antes do
-     * prazo; o candidato precisa existir; cada eleitor vota uma única vez.
-     */
+    
     public Voto votar(Usuario usuario, int numeroCandidato) throws ServicoException {
         synchronized (repo) {
             if (usuario == null) {
@@ -76,10 +69,7 @@ public class ServicoVotacao {
         }
     }
 
-    /**
-     * Calcula total de votos, percentual por candidato e vencedor(es).
-     * Só é liberada depois de encerrado o prazo.
-     */
+    
     public Resultado apurar() throws ServicoException {
         synchronized (repo) {
             if (votacaoAberta()) {
