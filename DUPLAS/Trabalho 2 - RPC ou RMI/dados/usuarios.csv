@@ -1,0 +1,8 @@
+# Usuários do sistema. Formato: login;senha;nome;perfil   (perfil = ELEITOR ou ADMINISTRADOR)
+# ATENÇÃO: senhas em texto puro apenas para fins didáticos.
+admin;admin123;Administrador do Sistema;ADMINISTRADOR
+eleitor1;123;Eleitor 1;ELEITOR
+eleitor2;123;Eleitor 2;ELEITOR
+eleitor3;123;Eleitor 3;ELEITOR
+eleitor4;123;Eleitor 4;ELEITOR
+eleitor5;123;Eleitor 5;ELEITOR
