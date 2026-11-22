@@ -1,0 +1,5 @@
+# Candidatos da votação. Formato: numero;nome;partido
+# Linhas em branco e iniciadas por '#' são ignoradas.
+13;Ada Lovelace;Partido dos Algoritmos
+22;Alan Turing;Partido da Computabilidade
+45;Grace Hopper;Partido dos Compiladores
