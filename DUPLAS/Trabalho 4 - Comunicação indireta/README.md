@@ -4,7 +4,7 @@
 
 ### Escolha e integração
 
-Adotamos a **Opção C — Filas de Mensagens** para evoluir o sistema de votação dos Trabalhos 1 e 2. O produtor envia solicitações de listagem, votação e apuração ao broker TCP/JSON. O consumidor retira as solicitações, aplica as regras de votação e publica as respostas em outra fila. O produtor usa o `correlationId` para encontrar a resposta.
+Escolhemos a **Opção C — Filas de Mensagens** para evoluir o sistema de votação dos Trabalhos 1 e 2. O produtor envia solicitações de listagem, votação e apuração ao broker TCP/JSON. O consumidor retira as solicitações, aplica as regras de votação e publica as respostas em outra fila. O produtor usa o `correlationId` para encontrar a resposta.
 
 O desacoplamento espacial ocorre porque o produtor configura apenas o endereço do broker e o consumidor também se conecta somente ao broker. O desacoplamento temporal ocorre porque o broker grava as solicitações em disco antes de confirmar a postagem. Assim, o produtor pode encerrar sua execução com o consumidor desligado e consultar o resultado em outra sessão.
 
