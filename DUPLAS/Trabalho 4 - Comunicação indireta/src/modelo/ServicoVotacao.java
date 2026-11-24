@@ -1,5 +1,6 @@
 package modelo;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -53,13 +54,17 @@ public class ServicoVotacao {
      * Registra o voto de um eleitor. Regras: apenas ELEITOR vota; somente antes do
      * prazo; o candidato precisa existir; cada eleitor vota uma única vez.
      */
-    public Voto votar(Usuario usuario, int numeroCandidato) throws ServicoException {
+    public Voto votar(Usuario usuario, int numeroCandidato, String idRequisicao) throws ServicoException, IOException {
         synchronized (repo) {
             if (usuario == null) {
                 throw new ServicoException("Usuário não autenticado.");
             }
             if (usuario.getPerfil() != Perfil.ELEITOR) {
                 throw new ServicoException("Apenas eleitores podem votar.");
+            }
+            Voto confirmado = repo.buscarVotoPorRequisicao(idRequisicao);
+            if (confirmado != null) {
+                return confirmado;
             }
             if (!votacaoAberta()) {
                 throw new ServicoException("A votação foi encerrada: votos não são mais aceitos.");
@@ -71,7 +76,7 @@ public class ServicoVotacao {
                 throw new ServicoException("Você já votou nesta eleição.");
             }
             Voto voto = new Voto(UUID.randomUUID().toString(), numeroCandidato, System.currentTimeMillis());
-            repo.registrarVoto(usuario.getLogin(), voto);
+            repo.registrarVoto(idRequisicao, usuario.getLogin(), voto);
             return voto;
         }
     }

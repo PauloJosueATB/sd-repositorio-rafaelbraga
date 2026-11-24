@@ -5,24 +5,37 @@ import java.io.DataOutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import protocolo.ArquivoAtomico;
 import protocolo.Json;
 
 /** Broker de filas persistente em disco. Não conhece produtor nem consumidor específicos. */
 public final class BrokerFilas {
     private static final DateTimeFormatter HORA = DateTimeFormatter.ofPattern("HH:mm:ss");
+    private static final long PRAZO_ACK = TimeUnit.SECONDS.toNanos(5);
     private final Path raiz;
+    private final Map<Path, Entrega> entregas = new HashMap<>();
+
+    private static final class Entrega {
+        private final String recibo = UUID.randomUUID().toString();
+        private final long expiraEm = System.nanoTime() + PRAZO_ACK;
+    }
 
     public BrokerFilas(Path raiz) {
         this.raiz = raiz;
@@ -32,8 +45,16 @@ public final class BrokerFilas {
         int porta = args.length > 0 ? Integer.parseInt(args[0]) : 7001;
         Path raiz = args.length > 1 ? Paths.get(args[1]) : Paths.get("dados-filas");
         BrokerFilas broker = new BrokerFilas(raiz);
-        broker.recuperarEmVoo();
-        broker.executar(porta);
+        Files.createDirectories(raiz);
+        try (FileChannel trava = FileChannel.open(raiz.resolve("broker.lock"),
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+             FileLock exclusivo = trava.tryLock()) {
+            if (exclusivo == null) {
+                throw new IllegalStateException("Já existe um broker usando " + raiz);
+            }
+            broker.recuperarEmVoo();
+            broker.executar(porta);
+        }
     }
 
     private void executar(int porta) throws Exception {
@@ -49,19 +70,13 @@ public final class BrokerFilas {
     }
 
     private void recuperarEmVoo() throws Exception {
-        Files.createDirectories(raiz);
-        if (!Files.isDirectory(raiz)) return;
         try (java.util.stream.Stream<Path> filas = Files.list(raiz)) {
             for (Path fila : filas.filter(Files::isDirectory).toArray(Path[]::new)) {
                 try (java.util.stream.Stream<Path> arquivos = Files.list(fila)) {
-                    arquivos.filter(p -> p.getFileName().toString().endsWith(".processing")).forEach(p -> {
-                        try {
-                            Path destino = p.resolveSibling(p.getFileName().toString().replace(".processing", ".pending"));
-                            Files.move(p, destino, StandardCopyOption.REPLACE_EXISTING);
-                        } catch (Exception e) {
-                            throw new RuntimeException(e);
-                        }
-                    });
+                    for (Path processamento : arquivos.filter(p -> p.getFileName().toString()
+                            .endsWith(".processing")).toArray(Path[]::new)) {
+                        devolver(processamento);
+                    }
                 }
             }
         }
@@ -70,27 +85,35 @@ public final class BrokerFilas {
     private synchronized Map<String, Object> enfileirar(Map<String, Object> comando) throws Exception {
         String fila = texto(comando, "queue");
         Object body = comando.get("body");
-        String id = UUID.randomUUID().toString();
-        Path pasta = raiz.resolve(fila);
+        String id = fila.equals("votacao-responses") && comando.containsKey("requestId")
+                ? UUID.fromString(texto(comando, "requestId")).toString()
+                : UUID.randomUUID().toString();
+        Path pasta = pastaFila(fila);
         Files.createDirectories(pasta);
         Map<String, Object> envelope = new LinkedHashMap<>();
         envelope.put("id", id);
         envelope.put("body", body);
-        Files.write(pasta.resolve(id + ".pending"), Json.escrever(envelope).getBytes(StandardCharsets.UTF_8));
+        Path destino = pasta.resolve(id + ".pending");
+        if (!Files.exists(destino)) {
+            ArquivoAtomico.gravar(destino, Json.escrever(envelope));
+        }
         Map<String, Object> resposta = new LinkedHashMap<>();
         resposta.put("ok", true);
         resposta.put("id", id);
         return resposta;
     }
 
+    @SuppressWarnings("unchecked")
     private synchronized Map<String, Object> desenfileirar(Map<String, Object> comando) throws Exception {
+        devolverExpiradas();
         String fila = texto(comando, "queue");
-        Path pasta = raiz.resolve(fila);
+        Path pasta = pastaFila(fila);
         Files.createDirectories(pasta);
         try (java.util.stream.Stream<Path> arquivos = Files.list(pasta)) {
             List<Path> pendentes = new ArrayList<>();
             arquivos.filter(p -> p.getFileName().toString().endsWith(".pending")).forEach(pendentes::add);
-            pendentes.sort(Comparator.comparing(p -> p.getFileName().toString()));
+            pendentes.sort(Comparator.comparingLong((Path p) -> p.toFile().lastModified())
+                    .thenComparing(p -> p.getFileName().toString()));
             if (pendentes.isEmpty()) {
                 Map<String, Object> vazio = new LinkedHashMap<>();
                 vazio.put("ok", true);
@@ -100,44 +123,66 @@ public final class BrokerFilas {
             Path origem = pendentes.get(0);
             String nome = origem.getFileName().toString().replace(".pending", "");
             Path destino = origem.resolveSibling(nome + ".processing");
-            Files.move(origem, destino, StandardCopyOption.REPLACE_EXISTING);
-            Map<String, Object> envelope = (Map<String, Object>) Json.ler(new String(Files.readAllBytes(destino), StandardCharsets.UTF_8));
+            Map<String, Object> envelope = (Map<String, Object>) Json.ler(Files.readString(origem, StandardCharsets.UTF_8));
+            Files.move(origem, destino, StandardCopyOption.ATOMIC_MOVE);
+            Entrega entrega = new Entrega();
+            entregas.put(destino, entrega);
             Map<String, Object> resposta = new LinkedHashMap<>();
             resposta.put("ok", true);
             resposta.put("empty", false);
             resposta.put("id", envelope.get("id"));
+            resposta.put("receipt", entrega.recibo);
             resposta.put("body", envelope.get("body"));
             return resposta;
         }
     }
 
-    private synchronized Map<String, Object> confirmar(Map<String, Object> comando) throws Exception {
-        String fila = texto(comando, "queue");
-        String id = texto(comando, "id");
-        Path processamento = raiz.resolve(fila).resolve(id + ".processing");
-        boolean removido = Files.deleteIfExists(processamento);
-        Map<String, Object> resposta = new LinkedHashMap<>();
-        resposta.put("ok", removido);
-        return resposta;
-    }
-
-    private synchronized Map<String, Object> negar(Map<String, Object> comando) throws Exception {
-        String fila = texto(comando, "queue");
-        String id = texto(comando, "id");
-        Path processamento = raiz.resolve(fila).resolve(id + ".processing");
-        Path pendente = raiz.resolve(fila).resolve(id + ".pending");
-        if (Files.exists(processamento)) {
-            Files.move(processamento, pendente, StandardCopyOption.REPLACE_EXISTING);
+    private void devolverExpiradas() throws Exception {
+        var iterador = entregas.entrySet().iterator();
+        while (iterador.hasNext()) {
+            var entrada = iterador.next();
+            if (System.nanoTime() - entrada.getValue().expiraEm >= 0) {
+                devolver(entrada.getKey());
+                iterador.remove();
+            }
         }
-        Map<String, Object> resposta = new LinkedHashMap<>();
-        resposta.put("ok", true);
-        return resposta;
     }
 
+    private void devolver(Path processamento) throws Exception {
+        String nome = processamento.getFileName().toString().replace(".processing", ".pending");
+        Files.move(processamento, processamento.resolveSibling(nome), StandardCopyOption.ATOMIC_MOVE);
+    }
+
+    private synchronized Map<String, Object> finalizar(Map<String, Object> comando, boolean confirmar) throws Exception {
+        devolverExpiradas();
+        Path pasta = pastaFila(texto(comando, "queue"));
+        String id = UUID.fromString(texto(comando, "id")).toString();
+        Path processamento = pasta.resolve(id + ".processing");
+        Entrega entrega = entregas.get(processamento);
+        if (entrega == null || !entrega.recibo.equals(texto(comando, "receipt"))) {
+            return Map.of("ok", false);
+        }
+        if (confirmar) {
+            Files.delete(processamento);
+        } else {
+            devolver(processamento);
+        }
+        entregas.remove(processamento);
+        return Map.of("ok", true);
+    }
+
+    private Path pastaFila(String fila) {
+        if (!fila.matches("[a-zA-Z0-9_-]+")) {
+            throw new IllegalArgumentException("Nome de fila inválido.");
+        }
+        return raiz.resolve(fila);
+    }
+
+    @SuppressWarnings("unchecked")
     private synchronized Map<String, Object> buscarResposta(Map<String, Object> comando) throws Exception {
         String fila = texto(comando, "queue");
         String correlationId = texto(comando, "correlationId");
-        Path pasta = raiz.resolve(fila);
+        Path pasta = pastaFila(fila);
         Files.createDirectories(pasta);
         try (java.util.stream.Stream<Path> arquivos = Files.list(pasta)) {
             List<Path> pendentes = new ArrayList<>();
@@ -149,7 +194,6 @@ public final class BrokerFilas {
                 if (body instanceof Map) {
                     Map<String, Object> b = (Map<String, Object>) body;
                     if (correlationId.equals(String.valueOf(b.get("correlationId")))) {
-                        Files.delete(pendente);
                         Map<String, Object> resposta = new LinkedHashMap<>();
                         resposta.put("ok", true);
                         resposta.put("found", true);
@@ -165,6 +209,7 @@ public final class BrokerFilas {
         return vazio;
     }
 
+    @SuppressWarnings("unchecked")
     private void atender(Socket socket) {
         try (Socket s = socket;
              DataInputStream entrada = new DataInputStream(s.getInputStream());
@@ -176,8 +221,8 @@ public final class BrokerFilas {
             switch (op) {
                 case "ENQUEUE": resposta = enfileirar(comando); break;
                 case "DEQUEUE": resposta = desenfileirar(comando); break;
-                case "ACK": resposta = confirmar(comando); break;
-                case "NACK": resposta = negar(comando); break;
+                case "ACK": resposta = finalizar(comando, true); break;
+                case "NACK": resposta = finalizar(comando, false); break;
                 case "POLL_RESPONSE": resposta = buscarResposta(comando); break;
                 default:
                     resposta = new LinkedHashMap<>(); resposta.put("ok", false); resposta.put("erro", "Operação desconhecida");

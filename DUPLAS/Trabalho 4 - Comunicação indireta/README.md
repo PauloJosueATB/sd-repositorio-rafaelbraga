@@ -1,84 +1,48 @@
-# Trabalho 4 — Comunicação Indireta com Filas de Mensagens
+# Trabalho 4 — Comunicação Indireta
 
-## 1. Objetivo e justificativa
+## Relatório técnico
 
-Este trabalho evolui o sistema de votação dos Trabalhos 1 e 2 para uma arquitetura de **filas de mensagens persistentes**. O cliente passa a publicar ações em um broker e não conhece endereço, processo ou estado do consumidor. Essa opção é adequada ao cenário porque os votos são operações assíncronas que podem ser postadas mesmo quando o serviço de votação está temporariamente indisponível. O intermediário também separa entrada dos eleitores da aplicação de domínio e permite controlar falhas sem acoplamento ponto a ponto.
+### Escolha e integração
 
-O modelo da votação foi reaproveitado dos trabalhos anteriores: `RepositorioEleicao`, `ServicoVotacao`, `Usuario`, `Candidato` e `Voto`. A principal mudança arquitetural está no transporte: não há chamada direta de método entre cliente e servidor.
+Adotamos a **Opção C — Filas de Mensagens** para evoluir o sistema de votação dos Trabalhos 1 e 2. O produtor envia solicitações de listagem, votação e apuração ao broker TCP/JSON. O consumidor retira as solicitações, aplica as regras de votação e publica as respostas em outra fila. O produtor usa o `correlationId` para encontrar a resposta.
 
-## 2. Arquitetura e fluxo
+O desacoplamento espacial ocorre porque o produtor configura apenas o endereço do broker e o consumidor também se conecta somente ao broker. O desacoplamento temporal ocorre porque o broker grava as solicitações em disco antes de confirmar a postagem. Assim, o produtor pode encerrar sua execução com o consumidor desligado e consultar o resultado em outra sessão.
 
-```text
-Cliente produtor -> Broker TCP -> fila votacao-requests -> Consumidor votacao
-                                      |                         |
-                                      +-----------------------v
-                                     fila votacao-responses <-+ 
-                                                           | Cliente consulta por correlationId
-```
+### Persistência e recuperação
 
-- **BrokerFilas:** intermediário TCP/JSON na porta 7001. Mantém as mensagens em arquivos `.pending` e `.processing` no diretório `dados-filas`.
-- **ConsumidorVotacao:** recebe mensagens, executa o serviço da votação e publica uma resposta. No consumidor não existe referência nem endereço IP do cliente.
-- **ClienteVotacaoFila:** conhece somente o broker. Posta ações e procura sua resposta pelo `correlationId`.
-- **ClienteFilas:** implementa o protocolo mínimo `ENQUEUE`, `DEQUEUE`, `ACK`, `NACK` e `POLL_RESPONSE`.
+O broker move a mensagem de `.pending` para `.processing` na retirada. Cada entrega recebe um recibo e tem cinco segundos para confirmação. Se o consumidor cair, uma nova tentativa de retirada após esse prazo devolve a mensagem à fila. Quando o broker reinicia, recupera as mensagens em processamento. Um `ACK` antigo é rejeitado se a mensagem já tiver sido entregue novamente.
 
-A fila usa despacho FIFO aproximado pelo nome sequencial dos arquivos. O produtor não envia diretamente ao receptor final: o único requisito espacial conhecido é o endereço do broker.
+O consumidor grava o voto, o controle de quem já votou e o prazo da eleição em disco. Em seguida publica a resposta e confirma a solicitação. Uma reentrega do mesmo pedido de voto devolve o comprovante original. As respostas ficam disponíveis para consultas posteriores. O tempo da eleição começa na primeira inicialização daquele diretório de estado. O prazo é avaliado no processamento e permanece igual após reiniciar.
 
-## 3. Persistência e robustez
+### Desempenho e gerenciamento
 
-Uma mensagem é gravada como JSON em disco antes o broker confirmar o `ENQUEUE`. Ao retirar da fila, o arquivo muda de `.pending` para `.processing`. Somente um `ACK` remove definitivamente a mensagem. Um `NACK` ou reinício do broker devolve arquivos `.processing` para `.pending`, evitando perda em caso de queda do consumidor.
+A passagem pelo broker inclui serialização JSON, conexões adicionais, gravações em disco e confirmações. A consulta periódica acrescenta até cerca de 500 ms de espera por retirada e 300 ms por consulta automática de resposta, além do tempo de rede e processamento. A listagem de arquivos da fila e a regravação do estado da eleição a cada voto aumentam o custo conforme o volume cresce. A análise é qualitativa.
 
-Consequentemente:
+Notificações de disponibilidade reduziriam o polling. Um índice por identificador e um armazenamento transacional reduziriam varreduras e regravações. A instalação didática usa um broker e um consumidor por eleição. Replicação do broker e retenção com prazo para respostas seriam passos para uma implantação maior. Use dados de teste porque o protocolo TCP e as solicitações em disco contêm credenciais sem criptografia.
 
-- **Desacoplamento espacial:** a aplicação cliente não possui IP/porta do consumidor.
-- **Desacoplamento temporal:** o produtor continua postando enquanto o consumidor está desligado; as mensagens aguardam no disco.
-- **Recuperação:** ao reiniciar o broker, mensagens pendentes e em processamento são recuperadas.
-- **Entrega:** o ACK evita que a requisição desapareça antes do processamento; a implementação não garante exatamente uma vez, mas evita perda em falhas simples e usa `correlationId` para relacionar resposta e pedido.
+## Demonstração prática
 
-Reiniciar o consumidor perde temporariamente o estado em memória da eleição, pois `RepositorioEleicao` é carregado novamente dos CSVs. Para produção seriam necessários replay e persistência de votos já aceitos, idempotência por `correlationId` e um mecanismo de transação/outbox.
+Use Java 11 ou superior e execute os comandos na pasta deste trabalho. No Windows, use `compilar.bat` e substitua `sh executar.sh` por `executar.bat`.
 
-## 4. Compilação e execução
+1. Compile com `sh compilar.sh`. Em um terminal, inicie somente o broker.
 
-### Windows
+   ```sh
+   sh executar.sh filas.BrokerFilas 7001 dados-filas-demo
+   ```
 
-```bat
-cd "Trabalho 4 - Comunicação indireta"
-compilar.bat
+2. Em outro terminal, envie um voto com o consumidor desligado. Copie o `correlationId` impresso e confira o arquivo `.pending` em `dados-filas-demo/votacao-requests`.
 
-executar.bat filas.BrokerFilas 7001 dados-filas
-executar.bat filas.ConsumidorVotacao localhost 7001 120
-executar.bat filas.ClienteVotacaoFila localhost 7001 listar
-executar.bat filas.ClienteVotacaoFila localhost 7001 votar eleitor1 123 13
-executar.bat filas.ClienteVotacaoFila localhost 7001 apurar
-```
+   ```sh
+   sh executar.sh filas.ClienteVotacaoFila localhost 7001 enfileirar votar eleitor1 123 13
+   ```
 
-### Linux/macOS
+3. Inicie o consumidor em um terceiro terminal. Consulte o comprovante em outra execução, substituindo `ID_COPIADO` pelo identificador da etapa anterior.
 
-```sh
-cd "Trabalho 4 - Comunicação indireta"
-./compilar.sh
+   ```sh
+   sh executar.sh filas.ConsumidorVotacao localhost 7001 60 estado-eleicao-demo
+   sh executar.sh filas.ClienteVotacaoFila localhost 7001 consultar ID_COPIADO
+   ```
 
-./executar.sh filas.BrokerFilas 7001 dados-filas
-./executar.sh filas.ConsumidorVotacao localhost 7001 120
-./executar.sh filas.ClienteVotacaoFila localhost 7001 listar
-./executar.sh filas.ClienteVotacaoFila localhost 7001 votar eleitor1 123 13
-./executar.sh filas.ClienteVotacaoFila localhost 7001 apurar
-```
+4. Pare o consumidor com Ctrl+C e poste outro voto com `eleitor2 123 22`. Suba o consumidor com o mesmo comando antes do fim dos 60 segundos e consulte o segundo comprovante. Após o fim do prazo, execute `sh executar.sh filas.ClienteVotacaoFila localhost 7001 apurar` e confira os dois votos.
 
-Credenciais de teste: `eleitor1` a `eleitor5`, senha `123`, ou `admin`/`admin123`.
-
-## 5. Demonstração prática de falha e recuperação
-
-1. Inicie o broker.
-2. **Não** inicie o consumidor.
-3. Execute `listar` ou `votar` no cliente. O comando deve ser confirmado pelo broker mesmo sem consumidor.
-4. Verifique a persistência em `dados-filas/votacao-requests`.
-5. Inicie o consumidor. Ele processa a mensagem pendente e a resposta aparece em `votacao-responses`.
-6. Reinicie o consumidor ou derrube-o após uma retirada. Mensagens `.processing` são devolvidas para `.pending` na próxima inicialização do broker.
-
-Para demonstrar o desacoplamento do consumidor, outra possibilidade é iniciar o cliente com outro terminal e alterar o consumidor da porta original. A única configuração necessária no cliente permanece sendo a porta/host do broker.
-
-## 6. Análise de desempenho e complexidade
-
-O intermediário cria trabalho extra: persistência em disco, serialização JSON, novas etapas de rede, polling e ACK. Isso aumenta latência em comparação com uma chamada RMI direta e reduz vazão se cada operação fizer uma gravação síncrona. A simplicidade também é limitada: o broker não replica dados, não usa confirmação distribuída e o estado da eleição não está persistido.
-
-As perdas podem ser mitigadas por: gravação em lote, nomes de arquivo sequenciais, cache do último ACK, indexação por fila, réplica dos arquivos do broker, limite de tamanho da fila, back-pressure e múltiplos consumidores. Em produção, um framework como RabbitMQ ou Kafka forneceria replicação, durabilidade, dead-letter queues e escalonamento. O grupo optou por manter o broker didático em Java puro para que persistência, ACK e recuperação possam ser demonstrados sem dependências externas.
+Para repetir com uma nova eleição, escolha novos diretórios vazios para o broker e para o estado do consumidor. Mantenha os mesmos diretórios quando quiser demonstrar recuperação. Os comandos sem `enfileirar` aguardam a resposta por até cerca de 30 segundos.

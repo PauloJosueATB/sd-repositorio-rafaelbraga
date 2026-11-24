@@ -1,29 +1,59 @@
 package modelo;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
+import protocolo.ArquivoAtomico;
+import protocolo.Json;
 
-/**
- * "Data" da arquitetura (Figura 1 do enunciado): guarda, em memória, os usuários,
- * candidatos, votos e notas. Todos os métodos são {@code synchronized} no próprio
- * repositório; os serviços usam {@code synchronized (repositorio)} para tornar
- * atômicas operações compostas (ex.: "verifica se já votou + registra o voto").
- */
+/** Armazena a eleição e mantém um registro persistente dos votos aceitos. */
 public class RepositorioEleicao {
     private final Eleicao eleicao;
     private final Map<String, Usuario> usuarios = new HashMap<>();
     private final Map<Integer, Candidato> candidatos = new TreeMap<>();
-    private final List<Voto> votos = new ArrayList<>();
+    private final Map<String, Voto> votos = new HashMap<>();
+    private Path arquivoEstado;
     private final Set<String> quemJaVotou = new HashSet<>();
     private final List<NotaInformativa> notas = new ArrayList<>();
 
     public RepositorioEleicao(Eleicao eleicao) {
         this.eleicao = eleicao;
+    }
+
+    @SuppressWarnings("unchecked")
+    public synchronized void abrirEstado(Path arquivo) throws IOException {
+        if (Files.exists(arquivo)) {
+            Map<String, Object> estado = (Map<String, Object>) Json.ler(Files.readString(arquivo));
+            eleicao.setInicio(((Number) estado.get("inicio")).longValue());
+            eleicao.setFim(((Number) estado.get("fim")).longValue());
+            quemJaVotou.addAll((List<String>) estado.get("eleitores"));
+            for (Map<String, Object> item : (List<Map<String, Object>>) estado.get("votos")) {
+                votos.put((String) item.get("requisicao"), new Voto((String) item.get("comprovante"),
+                        ((Number) item.get("candidato")).intValue(), ((Number) item.get("instante")).longValue()));
+            }
+        } else {
+            gravarEstado(arquivo, quemJaVotou, votos);
+        }
+        arquivoEstado = arquivo;
+    }
+
+    private void gravarEstado(Path arquivo, Collection<String> eleitores, Map<String, Voto> votos) throws IOException {
+        List<Map<String, Object>> registros = new ArrayList<>();
+        votos.forEach((id, voto) -> registros.add(Map.of(
+                "requisicao", id, "comprovante", voto.getComprovante(),
+                "candidato", voto.getNumeroCandidato(), "instante", voto.getInstante())));
+        ArquivoAtomico.gravar(arquivo, Json.escrever(Map.of(
+                "inicio", eleicao.getInicio(), "fim", eleicao.getFim(),
+                "eleitores", new ArrayList<>(new TreeSet<>(eleitores)), "votos", registros)));
     }
 
     public Eleicao getEleicao() {
@@ -80,14 +110,25 @@ public class RepositorioEleicao {
         return quemJaVotou.contains(login);
     }
 
-    public synchronized void registrarVoto(String login, Voto voto) {
+    public synchronized Voto buscarVotoPorRequisicao(String id) {
+        return votos.get(id);
+    }
+
+    public synchronized void registrarVoto(String id, String login, Voto voto) throws IOException {
+        if (arquivoEstado != null) {
+            Set<String> eleitores = new HashSet<>(quemJaVotou);
+            eleitores.add(login);
+            Map<String, Voto> atualizados = new HashMap<>(votos);
+            atualizados.put(id, voto);
+            gravarEstado(arquivoEstado, eleitores, atualizados);
+        }
         quemJaVotou.add(login);
-        votos.add(voto);
+        votos.put(id, voto);
     }
 
     public synchronized int contarVotos(int numeroCandidato) {
         int n = 0;
-        for (Voto v : votos) {
+        for (Voto v : votos.values()) {
             if (v.getNumeroCandidato() == numeroCandidato) {
                 n++;
             }

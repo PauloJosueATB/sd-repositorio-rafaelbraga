@@ -1,86 +1,108 @@
 package filas;
 
+import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Scanner;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import protocolo.Json;
 
 /** Produtor: conversa somente com o broker, nunca com o consumidor. */
 public final class ClienteVotacaoFila {
+    private static final String COMANDOS = "[enfileirar] listar | votar LOGIN SENHA NUMERO | apurar | tempo"
+            + " | consultar CORRELATION_ID";
+
     public static void main(String[] args) throws Exception {
         String host = args.length > 0 ? args[0] : "localhost";
         int porta = args.length > 1 ? Integer.parseInt(args[1]) : 7001;
         ClienteFilas broker = new ClienteFilas(host, porta);
 
         if (args.length > 2) {
-            executarComArgumentos(broker, args);
+            executar(broker, Arrays.copyOfRange(args, 2, args.length));
             return;
         }
 
-        Scanner entrada = new Scanner(System.in, "UTF-8");
-        System.out.println("Cliente assíncrono ligado ao broker " + host + ":" + porta);
-        System.out.println("Comandos: listar | votar LOGIN SENHA NUMERO | apurar | tempo | sair");
-        while (true) {
-            System.out.print("fila> ");
-            if (!entrada.hasNextLine()) break;
-            String[] p = entrada.nextLine().trim().split("\\s+");
-            if (p.length == 0 || p[0].isEmpty()) continue;
-            if (p[0].equalsIgnoreCase("sair")) break;
-            try {
-                if (p[0].equalsIgnoreCase("listar")) enviar(broker, "LISTAR_CANDIDATOS", null, null, null, 0);
-                else if (p[0].equalsIgnoreCase("apurar")) enviar(broker, "APURAR", null, null, null, 0);
-                else if (p[0].equalsIgnoreCase("tempo")) enviar(broker, "TEMPO_RESTANTE", null, null, null, 0);
-                else if (p[0].equalsIgnoreCase("votar") && p.length == 4)
-                    enviar(broker, "VOTAR", p[1], p[2], null, Integer.parseInt(p[3]));
-                else System.out.println("Comando inválido.");
-            } catch (Exception e) {
-                System.out.println("Erro: " + e.getMessage());
+        System.out.println("Cliente ligado ao broker " + host + ":" + porta);
+        System.out.println("Comandos: " + COMANDOS + " | sair");
+        try (Scanner entrada = new Scanner(System.in, "UTF-8")) {
+            while (true) {
+                System.out.print("fila> ");
+                if (!entrada.hasNextLine()) break;
+                String linha = entrada.nextLine().trim();
+                if (linha.isEmpty()) continue;
+                if (linha.equalsIgnoreCase("sair")) break;
+                try {
+                    executar(broker, linha.split("\\s+"));
+                } catch (Exception e) {
+                    System.out.println("Erro: " + e.getMessage());
+                }
             }
         }
     }
 
-    private static void executarComArgumentos(ClienteFilas broker, String[] args) throws Exception {
-        String comando = args[2].toLowerCase();
-        if ("listar".equals(comando)) enviar(broker, "LISTAR_CANDIDATOS", null, null, null, 0);
-        else if ("apurar".equals(comando)) enviar(broker, "APURAR", null, null, null, 0);
-        else if ("tempo".equals(comando)) enviar(broker, "TEMPO_RESTANTE", null, null, null, 0);
-        else if ("votar".equals(comando) && args.length >= 6)
-            enviar(broker, "VOTAR", args[3], args[4], null, Integer.parseInt(args[5]));
-        else throw new IllegalArgumentException("Uso: ClienteVotacaoFila [host] [porta] listar|apurar|tempo|votar LOGIN SENHA NUMERO");
-    }
+    private static void executar(ClienteFilas broker, String[] args) throws Exception {
+        if (args[0].equalsIgnoreCase("consultar") && args.length == 2) {
+            if (!consultar(broker, args[1])) {
+                System.out.println("Resposta ainda indisponível para " + args[1]);
+            }
+            return;
+        }
 
-    private static void enviar(ClienteFilas broker, String acao, String login, String senha, String ignorado, int numero) throws Exception {
+        boolean aguardar = !args[0].equalsIgnoreCase("enfileirar");
+        int inicio = aguardar ? 0 : 1;
+        if (inicio == args.length) {
+            throw new IllegalArgumentException("Uso: " + COMANDOS);
+        }
+
+        String comando = args[inicio].toLowerCase(Locale.ROOT);
+        String acao;
+        switch (comando) {
+            case "listar": acao = "LISTAR_CANDIDATOS"; break;
+            case "votar": acao = "VOTAR"; break;
+            case "apurar": acao = "APURAR"; break;
+            case "tempo": acao = "TEMPO_RESTANTE"; break;
+            default: throw new IllegalArgumentException("Uso: " + COMANDOS);
+        }
+        int argumentos = comando.equals("votar") ? 4 : 1;
+        if (args.length - inicio != argumentos) {
+            throw new IllegalArgumentException("Uso: " + COMANDOS);
+        }
+
         String correlationId = UUID.randomUUID().toString();
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("action", acao);
         body.put("correlationId", correlationId);
-        if (login != null) body.put("login", login);
-        if (senha != null) body.put("senha", senha);
-        if (acao.equals("VOTAR")) body.put("numero", numero);
-
-        Map<String, Object> comando = new LinkedHashMap<>();
-        comando.put("op", "ENQUEUE");
-        comando.put("queue", "votacao-requests");
-        comando.put("body", body);
-        Map<String, Object> postado = broker.executar(comando);
-        if (!Boolean.TRUE.equals(postado.get("ok"))) throw new RuntimeException("Falha ao postar mensagem");
-        System.out.println("Postado na fila (correlationId=" + correlationId + ", messageId=" + postado.get("id") + ")");
-
-        long prazo = System.currentTimeMillis() + 30000;
-        while (System.currentTimeMillis() < prazo) {
-            Map<String, Object> poll = new LinkedHashMap<>();
-            poll.put("op", "POLL_RESPONSE");
-            poll.put("queue", "votacao-responses");
-            poll.put("correlationId", correlationId);
-            Map<String, Object> resultado = broker.executar(poll);
-            if (Boolean.TRUE.equals(resultado.get("found"))) {
-                System.out.println(Json.escrever(resultado.get("body")));
-                return;
-            }
-            Thread.sleep(300);
+        if (comando.equals("votar")) {
+            body.put("login", args[inicio + 1]);
+            body.put("senha", args[inicio + 2]);
+            body.put("numero", Integer.parseInt(args[inicio + 3]));
         }
-        System.out.println("Resposta ainda não disponível. Ela pode ser recebida ao enviar o mesmo correlationId novamente? "
-                + "Use o mesmo cliente/execução; o broker mantém a resposta persistida.");
+
+        Map<String, Object> postado = broker.executar(Map.of("op", "ENQUEUE",
+                "queue", "votacao-requests", "body", body));
+        if (!Boolean.TRUE.equals(postado.get("ok"))) {
+            throw new IllegalStateException("Falha ao postar mensagem");
+        }
+        System.out.println("Postado na fila (correlationId=" + correlationId + ", messageId=" + postado.get("id") + ")");
+        if (aguardar) {
+            long prazo = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (System.nanoTime() - prazo < 0) {
+                if (consultar(broker, correlationId)) return;
+                Thread.sleep(300);
+            }
+            System.out.println("Resposta ainda indisponível. Consulte depois com: consultar " + correlationId);
+        }
+    }
+
+    private static boolean consultar(ClienteFilas broker, String correlationId) throws Exception {
+        Map<String, Object> resultado = broker.executar(Map.of("op", "POLL_RESPONSE",
+                "queue", "votacao-responses", "correlationId", correlationId));
+        if (!Boolean.TRUE.equals(resultado.get("found"))) {
+            return false;
+        }
+        System.out.println(Json.escrever(resultado.get("body")));
+        return true;
     }
 }

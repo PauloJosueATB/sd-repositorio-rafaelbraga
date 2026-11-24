@@ -15,4 +15,4 @@ if "%~1"=="" (
 )
 set CLASSE=%~1
 shift
-java -Djava.net.preferIPv4Stack=true -Dfile.encoding=UTF-8 -cp out %CLASSE% %1 %2 %3 %4 %5 %6
+java -Djava.net.preferIPv4Stack=true -Dfile.encoding=UTF-8 -cp out %CLASSE% %1 %2 %3 %4 %5 %6 %7

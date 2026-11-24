@@ -10,4 +10,4 @@ if [ "$#" -eq 0 ]; then
   echo "  ./executar.sh filas.ClienteVotacaoFila localhost 7001 listar"
   exit 1
 fi
-java -Dfile.encoding=UTF-8 -cp out "$@"
+exec java -Dfile.encoding=UTF-8 -cp out "$@"
